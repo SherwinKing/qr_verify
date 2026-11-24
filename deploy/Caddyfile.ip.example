@@ -1,0 +1,17 @@
+{
+	admin off
+	auto_https off
+}
+
+# Temporary IP-only deployment. QR URLs will use http://<ECS_PUBLIC_IP>/v/{token}.
+:80 {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8000
+
+	header {
+		Strict-Transport-Security "max-age=0"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+}

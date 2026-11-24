@@ -1,0 +1,2 @@
+cryptography>=44
+qrcode==8.2
