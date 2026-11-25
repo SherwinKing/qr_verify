@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from functools import partial
@@ -59,13 +60,13 @@ class AppHandler(BaseHTTPRequestHandler):
         lang = self.choose_language(query.get("lang", [None])[0])
         data = tokens.verify_token(self.config.public_key, token)
         if data is None:
-            self.render_result(lang, False, None, None, 0, False)
+            self.render_result(token, lang, False, None, None, 0, False)
             return
 
         products = self.config.products()
         product = products.get(str(data.product_id))
         if not isinstance(product, dict):
-            self.render_result(lang, False, None, None, 0, False)
+            self.render_result(token, lang, False, None, None, 0, False)
             return
 
         hashed = tokens.token_hash(token)
@@ -74,12 +75,12 @@ class AppHandler(BaseHTTPRequestHandler):
         try:
             database.migrate()
             if database.is_revoked(hashed):
-                self.render_result(lang, False, product, data.batch_id, 0, False, revoked=True)
+                self.render_result(token, lang, False, product, data.batch_id, 0, False, revoked=True)
                 return
             scan = database.record_scan(hashed, data.product_id, data.batch_id)
         except Exception:
             raise
-        self.render_result(lang, True, product, data.batch_id, scan.scan_count, scan.is_first_scan)
+        self.render_result(token, lang, True, product, data.batch_id, scan.scan_count, scan.is_first_scan)
 
     def choose_language(self, query_lang: str | None) -> str:
         if query_lang in {"en", "ar"}:
@@ -111,47 +112,154 @@ button {{ font:inherit; padding:.7rem 1rem; border-radius:.6rem; border:0; backg
 </style>
 </head><body><main><div class="card"><p>{escape(message)}</p>{body}</div></main></body></html>"""
 
-    def render_result(self, lang: str, valid: bool, product: dict | None, batch_id: int | None,
-                      scan_count: int, first: bool, revoked: bool = False) -> None:
+    def render_result(self, token: str, lang: str, valid: bool, product: dict | None,
+                      batch_id: int | None, scan_count: int, first: bool,
+                      revoked: bool = False) -> None:
+        del lang, product, batch_id
+        current_host = escape(self.headers.get("Host", "121.43.32.57"))
+
         if not valid:
-            english = "This product code is invalid." if not revoked else "This product code has been revoked."
-            arabic = "رمز المنتج غير صالح." if not revoked else "تم إلغاء هذا الرمز."
-            css_class = "invalid"
-            status = 404 if not revoked else 410
-            body = "<p><strong>Do not trust this product.</strong></p>" if lang == "en" else "<p><strong>لا تثق بهذا المنتج.</strong></p>"
-            self._send_html(status, self.render_page(english, arabic, lang, body), "text/html; charset=utf-8", css_class)
+            reason = "Code Revoked" if revoked else "Invalid Code"
+            title = "Product Authenticity Verification"
+            body = f"""
+            <div class="outer">
+              <div class="card failed">
+                <h2><span class="emoji">❌</span> Verification Failed</h2>
+                <p>We cannot verify this product.</p>
+                <div class="reason"><p><strong>Reason:</strong> {reason}</p></div>
+              </div>
+            </div>
+            """
+            status = 410 if revoked else 404
+            self._send_html(status, self.render_result_page(title, body), "text/html; charset=utf-8")
             return
 
-        names = product or {}
-        product_name = str(names.get(lang) or names.get("en") or "Product")
         if first:
-            english = "First verification"
-            arabic = "أول تحقق"
-            risk = "No previous scans were recorded." if lang == "en" else "لا توجد عمليات تحقق سابقة."
-        else:
-            english = f"Scanned {scan_count} times"
-            arabic = f"تم التحقق {scan_count} مرة"
-            if scan_count >= self.config.strong_repeat_threshold:
-                risk = "This code has been scanned repeatedly. Compare carefully and consider risk." if lang == "en" else "تم التحقق من هذا الرمز عدة مرات. يرجى توخي الحذر."
-            else:
-                risk = "This code has been scanned before. Keep the QR link private." if lang == "en" else "تم التحقق من هذا الرمز سابقًا. حافظ على سرية الرابط."
-        body = f"""<h1>{escape(product_name)}</h1>
-<p class="count">{scan_count}</p><p>{escape(risk)}</p>
-<p class="note">A valid code does not prove that the physical item is genuine.</p>"""
-        if lang == "ar":
-            body = f"""<h1>{escape(product_name)}</h1>
-<p class="count">{scan_count}</p><p>{escape(risk)}</p>
-<p class="note">الرمز الصالح لا يثبت بالضرورة أن المنتج الأصلي.</p>"""
-        self._send_html(200, self.render_result_page(english if lang == "en" else arabic, lang, body), "text/html; charset=utf-8", "valid")
+            serial = hashlib.sha256(token.encode("ascii")).hexdigest()[:8].upper()
+            title = "Product Authenticity Verification"
+            body = f"""
+            <div class="outer">
+              <div class="card authentic">
+                <h2><span class="emoji">✅</span> Product is Authentic</h2>
+                <div class="status-line"><span class="strong">Scan Count:</span> 1</div>
+                <div class="status-line safe">(Safe)</div>
+                <div class="status-line"><span class="strong">Serial:</span> {serial}</div>
+                <div class="status-line"><span class="strong">URL:</span> {current_host}</div>
+              </div>
+            </div>
+            """
+            self._send_html(200, self.render_result_page(title, body), "text/html; charset=utf-8")
+            return
 
-    def render_result_page(self, title: str, lang: str, body: str) -> str:
-        direction = ' dir="rtl" lang="ar"' if lang == "ar" else ' lang="en"'
+        title = "Product Authenticity Verification"
+        body = f"""
+        <div class="outer">
+          <div class="card warning">
+            <h2><span class="emoji">⚠️</span> Scan History Warning</h2>
+            <p>This unique <span class="strong">authenticity code</span> has been scanned
+               <span class="count">{scan_count}</span> times.</p>
+            <div class="notice">
+              <p><strong>Important:</strong> If you did <strong>not</strong> personally scan this
+                 product previously, its authenticity cannot be guaranteed. This may indicate that
+                 the code has been duplicated or tampered with.</p>
+            </div>
+            <button type="button">Report Suspicious Product</button>
+            <p class="hint">If you scanned this yourself previously, no further action is required.</p>
+          </div>
+        </div>
+        """
+        self._send_html(200, self.render_result_page(title, body), "text/html; charset=utf-8")
+
+    def render_result_page(self, title: str, body: str) -> str:
         return f"""<!doctype html>
-<html{direction}><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex,nofollow"><title>{escape(title)}</title>
-<style>body{{font-family:system-ui,sans-serif;background:#f5f5f5;margin:0}}main{{max-width:30rem;margin:auto;padding:1rem}}
-.card{{background:#fff;border-radius:1rem;padding:1.25rem;box-shadow:0 2px 10px rgba(0,0,0,.1)}}.valid{{border-top:.35rem solid #16a34a}}.count{{font-size:2rem;font-weight:700}}</style>
-</head><body><main><div class="card">{body}</div></main></body></html>"""
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<meta name="theme-color" content="#000">
+<title>{escape(title)}</title>
+<style>
+* {{ box-sizing: border-box; }}
+html, body {{ margin: 0; min-height: 100vh; }}
+body {{
+  background: #f3f4f6;
+  color: #111827;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+  font-size: 16px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}}
+.outer {{
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 1rem;
+}}
+.card {{
+  width: 100%;
+  max-width: 28rem;
+  margin: auto;
+  padding: 1.5rem;
+  border-radius: .5rem;
+  border: 1px solid;
+  text-align: center;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .05);
+}}
+.authentic {{ background: #f0fdf4; border-color: #bbf7d0; }}
+.warning {{ background: #fff7ed; border-color: #fed7aa; }}
+.failed {{ background: #fef2f2; border-color: #fecaca; }}
+h2 {{
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: .5rem;
+  margin: 0;
+  font-size: 1.25rem;
+  line-height: 2rem;
+  font-weight: 700;
+}}
+.authentic h2 {{ color: #166534; }}
+.warning h2 {{ color: #9a3412; }}
+.failed h2 {{ color: #991b1b; }}
+.authentic p, .warning p, .failed p {{ margin-top: 1rem; margin-bottom: 0; color: #7c2d12; }}
+.failed p {{ color: #7f1d1d; }}
+.strong {{ font-weight: 600; }}
+.count {{ font-size: 1.5rem; line-height: 2rem; font-weight: 700; }}
+.status-line {{ margin-top: .5rem; color: #166534; }}
+.status-line.safe {{ font-weight: 700; }}
+.notice {{
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid #fed7aa;
+  border-radius: .25rem;
+  background: rgba(255, 255, 255, .6);
+  text-align: left;
+}}
+.notice p {{ margin: 0; font-size: .875rem; line-height: 1.625; color: #7c2d12; }}
+.reason {{ margin-top: 1rem; padding: 1rem; border: 1px solid #fecaca; border-radius: .25rem; background: rgba(255,255,255,.6); text-align: left; }}
+.reason p {{ margin: 0; font-size: .875rem; line-height: 1.625; color: #7f1d1d; }}
+button {{
+  width: 100%;
+  margin-top: 1.5rem;
+  padding: .5rem 1rem;
+  border: 0;
+  border-radius: .25rem;
+  background: #ea580c;
+  color: #fff;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.5rem;
+  cursor: pointer;
+}}
+button:hover {{ background: #c2410c; }}
+.hint {{ margin-top: .75rem; font-size: .75rem; font-style: italic; color: #ea580c; }}
+@media (max-width: 640px) {{
+  .outer {{ padding: 1rem; }}
+  h2 {{ font-size: 1.25rem; line-height: 1.75rem; }}
+}}
+</style>
+</head><body>{body}</body></html>"""
 
     def _common_headers(self) -> None:
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
